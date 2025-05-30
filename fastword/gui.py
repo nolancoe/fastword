@@ -4,7 +4,7 @@ from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QLineEdit, QPushButton,
     QVBoxLayout, QMessageBox, QCheckBox, QSpinBox, QTextEdit, QStackedLayout, QInputDialog, QScrollArea, QFrame, QHBoxLayout
 )
-from PyQt6.QtCore import Qt
+from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QClipboard, QIcon
 from crypto import (
     get_fernet, save_verify_token, verify_master_password, VERIFY_FILE, encrypt, decrypt
@@ -162,6 +162,13 @@ class VaultWindow(QWidget):
         self.new_password_btn.clicked.connect(lambda: self.stack.setCurrentIndex(1))
         self.vault_layout.addWidget(self.new_password_btn)
 
+
+        self.search_input = QLineEdit()
+        self.search_input.setPlaceholderText("Search passwords...")
+        self.search_input.textChanged.connect(self.filter_passwords)
+        self.vault_layout.addWidget(self.search_input)
+
+
         self.scroll_area = QScrollArea()
         self.scroll_area.setWidgetResizable(True)
         self.password_container = QWidget()
@@ -170,6 +177,37 @@ class VaultWindow(QWidget):
         self.password_container.setLayout(self.password_layout)
         self.scroll_area.setWidget(self.password_container)
         self.vault_layout.addWidget(self.scroll_area)
+
+        # Settings button
+        settings_row = QHBoxLayout()
+        settings_row.setAlignment(Qt.AlignmentFlag.AlignRight)
+
+        settings_btn = QPushButton()
+        settings_btn.setIcon(QIcon("fastword/icons/settings.svg"))
+        settings_btn.setFixedSize(36, 36)
+        settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        settings_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0dd420;
+                border-radius: 6px;
+                border: none;
+            }
+            QPushButton:hover {
+                background-color: #00e070;
+            }
+        """)
+        settings_btn.clicked.connect(lambda: self.stack.setCurrentIndex(2))
+        settings_row.addWidget(settings_btn)
+
+
+
+        self.settings_screen = SettingsScreen(back_callback=self.refresh_vault_screen, fernet=self.fernet)
+            
+
+
+
+        self.vault_layout.addLayout(settings_row)
+
 
         self.vault_screen.setLayout(self.vault_layout)
 
@@ -180,6 +218,7 @@ class VaultWindow(QWidget):
 
         self.stack.addWidget(self.vault_screen)
         self.stack.addWidget(self.generator_screen)
+        self.stack.addWidget(self.settings_screen)
         self.layout.addLayout(self.stack)
 
         self.populate_passwords()
@@ -188,11 +227,19 @@ class VaultWindow(QWidget):
         self.populate_passwords()
         self.stack.setCurrentIndex(0)
 
-    def populate_passwords(self):
+
+    def filter_passwords(self):
+        text = self.search_input.text()
+        self.populate_passwords(filter_text=text)
+
+
+    def populate_passwords(self, filter_text="" ):
         for i in reversed(range(self.password_layout.count())):
             self.password_layout.itemAt(i).widget().deleteLater()
 
         for name, pwd in load_passwords(self.fernet):
+            if filter_text.lower() not in name.lower():
+                continue
             entry = QFrame()
             entry_layout = QVBoxLayout()
             entry_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -201,7 +248,15 @@ class VaultWindow(QWidget):
             name_btn = QPushButton(f" {name}")
             name_btn.setStyleSheet("QPushButton { background-color: transparent; color: #0dd420; font-weight: bold; border: none; font-size: 16px; text-align: center; }")
             name_btn.setCursor(Qt.CursorShape.PointingHandCursor)
-            name_btn.clicked.connect(lambda _, p=pwd: QApplication.clipboard().setText(p))
+            
+
+
+            name_btn.clicked.connect(
+                lambda _, b=name_btn, t=pwd, n=name: self.copy_and_notify(b, t, n)
+            )
+
+
+
 
             button_row = QHBoxLayout()
             button_row.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -252,6 +307,16 @@ class VaultWindow(QWidget):
             entry_layout.addLayout(button_row)
             self.password_layout.addWidget(entry)
 
+
+
+    def copy_and_notify(self, btn, text, original_name):
+        QApplication.clipboard().setText(text)
+        old_icon = btn.icon()
+        btn.setIcon(QIcon("fastword/icons/copy.svg"))
+        QTimer.singleShot(1200, lambda: btn.setIcon(old_icon))
+
+
+
     def confirm_delete(self, name):
         confirm1 = QMessageBox.question(
             self,
@@ -263,7 +328,7 @@ class VaultWindow(QWidget):
         if confirm1 == QMessageBox.StandardButton.Yes:
             confirm2 = QMessageBox.warning(
                 self,
-                "⚠️ Permanent Deletion",
+                "Permanent Deletion",
                 f"This will permanently delete '{name}' and there is NO way to recover it.\nAre you 100% sure?",
                 QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
             )
@@ -379,11 +444,41 @@ class PasswordGeneratorScreen(QWidget):
 
         layout = QVBoxLayout()
 
+
+        # Header row for back button
+        header_row = QHBoxLayout()
+        header_row.setAlignment(Qt.AlignmentFlag.AlignLeft)
+
+        self.back_btn = QPushButton()
+        self.back_btn.setIcon(QIcon("fastword/icons/back.svg"))
+        self.back_btn.setFixedSize(36, 36)
+        self.back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.back_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0dd420;
+                border-radius: 6px;
+                border: none;
+            }
+            QPushButton:hover {
+                background-color: #00e070;
+            }
+        """)
+        self.back_btn.clicked.connect(back_callback)
+
+        header_row.addWidget(self.back_btn)
+        layout.addLayout(header_row)
+
+
+        length_row = QHBoxLayout()
+        length_label = QLabel("Password Length:")
         self.length_input = QSpinBox()
         self.length_input.setRange(4, 64)
         self.length_input.setValue(16)
-        layout.addWidget(QLabel("Password Length:"))
-        layout.addWidget(self.length_input)
+
+        length_row.addWidget(length_label)
+        length_row.addWidget(self.length_input)
+        layout.addLayout(length_row)
+
 
         self.use_upper = QCheckBox("Include Uppercase")
         self.use_upper.setChecked(True)
@@ -404,7 +499,7 @@ class PasswordGeneratorScreen(QWidget):
         layout.addWidget(self.generate_btn)
 
         self.output = QTextEdit()
-        self.output.setReadOnly(True)
+        self.output.setReadOnly(False)
         layout.addWidget(self.output)
 
         self.save_btn = QPushButton("Save Password")
@@ -413,7 +508,7 @@ class PasswordGeneratorScreen(QWidget):
 
         self.back_btn = QPushButton("Back to Vault")
         self.back_btn.clicked.connect(back_callback)
-        layout.addWidget(self.back_btn)
+
 
         self.setLayout(layout)
 
@@ -450,3 +545,75 @@ class PasswordGeneratorScreen(QWidget):
                 encrypted_pwd = encrypt(self.fernet, pwd)
                 conn.execute("INSERT INTO passwords (name, encrypted_password) VALUES (?, ?)", (name, encrypted_pwd))
                 QMessageBox.information(self, "Saved", f"Password saved as '{name}'.")
+
+
+class SettingsScreen(QWidget):
+    def __init__(self, back_callback, fernet):
+        super().__init__()
+        self.fernet = fernet
+        self.setStyleSheet("""
+            QWidget {
+                background-color: #1a1a1a;
+                color: #e0e0e0;
+                font-family: 'Segoe UI', sans-serif;
+                font-size: 14px;
+            }
+            QPushButton {
+                background-color: #0dd420;
+                color: #000;
+                padding: 10px;
+                border: none;
+                border-radius: 8px;
+                font-weight: bold;
+            }
+            QPushButton:hover {
+                background-color: #00e070;
+            }
+        """)
+
+        layout = QVBoxLayout()
+        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        back_btn = QPushButton()
+        back_btn.setIcon(QIcon("fastword/icons/back.svg"))
+        back_btn.setFixedSize(36, 36)
+        back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        back_btn.setStyleSheet("""
+            QPushButton {
+                background-color: #0dd420;
+                border-radius: 6px;
+                border: none;
+            }
+            QPushButton:hover {
+                background-color: #00e070;
+            }
+        """)
+        back_btn.clicked.connect(back_callback)
+        layout.addWidget(back_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        change_btn = QPushButton("Change Master Password")
+        change_btn.clicked.connect(self.change_password)
+        layout.addWidget(change_btn)
+
+        self.setLayout(layout)
+
+    def change_password(self):
+        old_pw, ok1 = QInputDialog.getText(self, "Verify Password", "Enter your current master password:", QLineEdit.EchoMode.Password)
+        if not ok1 or not old_pw:
+            return
+
+        if not verify_master_password(get_fernet(old_pw)):
+            QMessageBox.warning(self, "Incorrect Password", "The current master password you entered is incorrect.")
+            return
+
+        new_pw, ok2 = QInputDialog.getText(self, "New Password", "Enter a new master password:", QLineEdit.EchoMode.Password)
+        if not ok2 or not new_pw:
+            return
+
+        confirm_pw, ok3 = QInputDialog.getText(self, "Confirm Password", "Re-enter new password:", QLineEdit.EchoMode.Password)
+        if not ok3 or new_pw != confirm_pw:
+            QMessageBox.warning(self, "Mismatch", "Passwords do not match.")
+            return
+
+        save_verify_token(get_fernet(new_pw))
+        QMessageBox.information(self, "Password Changed", "Your master password was successfully updated.")
