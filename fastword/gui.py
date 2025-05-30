@@ -20,7 +20,7 @@ def init_db():
         conn.execute("""
             CREATE TABLE IF NOT EXISTS passwords (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
-                name TEXT NOT NULL,
+                name TEXT NOT NULL UNIQUE,
                 encrypted_password TEXT NOT NULL
             )
         """)
@@ -116,7 +116,7 @@ class VaultWindow(QWidget):
         self.fernet = fernet
         init_db()
 
-        self.setWindowTitle("🔐 Fastword Vault")
+        self.setWindowTitle(" Fastword Vault")
         self.resize(300, 500)
         self.setStyleSheet("""
             QWidget {
@@ -198,7 +198,7 @@ class VaultWindow(QWidget):
             entry_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
             entry.setLayout(entry_layout)
 
-            name_btn = QPushButton(f"🔐 {name}")
+            name_btn = QPushButton(f" {name}")
             name_btn.setStyleSheet("QPushButton { background-color: transparent; color: #0dd420; font-weight: bold; border: none; font-size: 16px; text-align: center; }")
             name_btn.setCursor(Qt.CursorShape.PointingHandCursor)
             name_btn.clicked.connect(lambda _, p=pwd: QApplication.clipboard().setText(p))
@@ -224,8 +224,13 @@ class VaultWindow(QWidget):
                 return btn
 
             view_btn = create_icon_button("fastword/icons/eye.svg")
+            
             edit_btn = create_icon_button("fastword/icons/pencil.svg")
+            edit_btn.clicked.connect(lambda _, n=name, p=pwd: self.edit_password_dialog(n, p))
+
             delete_btn = create_icon_button("fastword/icons/trash.svg")
+            delete_btn.clicked.connect(lambda _, n=name: self.confirm_delete(n))
+
 
             button_row.addWidget(view_btn)
             button_row.addWidget(edit_btn)
@@ -233,11 +238,11 @@ class VaultWindow(QWidget):
 
             def make_toggle_fn(name_btn=name_btn, view_btn=view_btn, name=name, pwd=pwd):
                 def toggle():
-                    if name_btn.text() == f"🔐 {name}":
-                        name_btn.setText(f"🔐 {pwd}")
+                    if name_btn.text() == f" {name}":
+                        name_btn.setText(f" {pwd}")
                         view_btn.setIcon(QIcon("fastword/icons/eye-off.svg"))
                     else:
-                        name_btn.setText(f"🔐 {name}")
+                        name_btn.setText(f" {name}")
                         view_btn.setIcon(QIcon("fastword/icons/eye.svg"))
                 return toggle
 
@@ -246,6 +251,106 @@ class VaultWindow(QWidget):
             entry_layout.addWidget(name_btn)
             entry_layout.addLayout(button_row)
             self.password_layout.addWidget(entry)
+
+    def confirm_delete(self, name):
+        confirm1 = QMessageBox.question(
+            self,
+            "Confirm Delete",
+            f"Are you sure you want to delete '{name}'?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+        )
+
+        if confirm1 == QMessageBox.StandardButton.Yes:
+            confirm2 = QMessageBox.warning(
+                self,
+                "⚠️ Permanent Deletion",
+                f"This will permanently delete '{name}' and there is NO way to recover it.\nAre you 100% sure?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+            )
+
+            if confirm2 == QMessageBox.StandardButton.Yes:
+                self.delete_password(name)
+
+    def delete_password(self, name):
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("DELETE FROM passwords WHERE name = ?", (name,))
+        self.populate_passwords()
+
+    def edit_password_dialog(self, old_name, old_password):
+        dlg = QWidget()
+        dlg.setWindowTitle("Edit Password Entry")
+        dlg.setStyleSheet("""
+            QWidget {
+                background-color: #121212;
+                color: #E0E0E0;
+                font-family: 'Segoe UI';
+                font-size: 14px;
+            }
+        """)
+        layout = QVBoxLayout()
+
+        name_input = QLineEdit(old_name)
+        password_input = QLineEdit(old_password)
+        password_input.setEchoMode(QLineEdit.EchoMode.Normal)
+
+        layout.addWidget(QLabel("New Name:"))
+        layout.addWidget(name_input)
+        layout.addWidget(QLabel("New Password:"))
+        layout.addWidget(password_input)
+
+        save_btn = QPushButton("Save Changes")
+        cancel_btn = QPushButton("Cancel")
+
+        layout.addWidget(save_btn)
+        layout.addWidget(cancel_btn)
+
+        dlg.setLayout(layout)
+
+        def on_save():
+            new_name = name_input.text().strip()
+            new_password = password_input.text().strip()
+
+            if not new_name or not new_password:
+                QMessageBox.warning(dlg, "Invalid Input", "Name and password cannot be empty.")
+                return
+
+            if new_name != old_name:
+                # Ensure new name doesn't conflict with an existing entry
+                with sqlite3.connect(DB_PATH) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT COUNT(*) FROM passwords WHERE name = ?", (new_name,))
+                    if cursor.fetchone()[0] > 0:
+                        QMessageBox.warning(dlg, "Duplicate Name", f"A password named '{new_name}' already exists.")
+                        return
+
+            confirm = QMessageBox.question(
+                dlg,
+                "Confirm Save",
+                "Saving will permanently overwrite the current password.\n\nDo you want to continue?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+            )
+
+            if confirm == QMessageBox.StandardButton.Yes:
+                with sqlite3.connect(DB_PATH) as conn:
+                    encrypted_pwd = encrypt(self.fernet, new_password)
+                    if new_name == old_name:
+                        conn.execute("UPDATE passwords SET encrypted_password = ? WHERE name = ?", (encrypted_pwd, old_name))
+                    else:
+                        conn.execute("DELETE FROM passwords WHERE name = ?", (old_name,))
+                        conn.execute("INSERT INTO passwords (name, encrypted_password) VALUES (?, ?)", (new_name, encrypted_pwd))
+
+                dlg.close()
+                self.populate_passwords()
+
+
+        save_btn.clicked.connect(on_save)
+        cancel_btn.clicked.connect(dlg.close)
+
+        dlg.setFixedWidth(350)
+        dlg.setFixedHeight(250)
+        dlg.setWindowModality(Qt.WindowModality.ApplicationModal)
+        dlg.show()
+
 
 
 class PasswordGeneratorScreen(QWidget):
@@ -333,7 +438,15 @@ class PasswordGeneratorScreen(QWidget):
 
         name, ok = QInputDialog.getText(self, "Save Password", "Name this password:")
         if ok and name:
-            encrypted_pwd = encrypt(self.fernet, pwd)
+            # Check for duplicate name
             with sqlite3.connect(DB_PATH) as conn:
+                cursor = conn.cursor()
+                cursor.execute("SELECT COUNT(*) FROM passwords WHERE name = ?", (name,))
+                if cursor.fetchone()[0] > 0:
+                    QMessageBox.warning(self, "Duplicate Name", f"A password named '{name}' already exists.\nPlease choose a different name.")
+                    return
+
+                # Proceed with saving if name is unique
+                encrypted_pwd = encrypt(self.fernet, pwd)
                 conn.execute("INSERT INTO passwords (name, encrypted_password) VALUES (?, ?)", (name, encrypted_pwd))
-            QMessageBox.information(self, "Saved", f"Password saved as '{name}'.")
+                QMessageBox.information(self, "Saved", f"Password saved as '{name}'.")
