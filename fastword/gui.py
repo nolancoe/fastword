@@ -2,14 +2,15 @@ import os
 import sqlite3
 from PyQt6.QtWidgets import (
     QApplication, QWidget, QLabel, QLineEdit, QPushButton,
-    QVBoxLayout, QMessageBox, QCheckBox, QSpinBox, QTextEdit, QStackedLayout, QInputDialog, QScrollArea, QFrame, QHBoxLayout
+    QVBoxLayout, QMessageBox, QCheckBox, QSpinBox, QTextEdit, 
+    QStackedLayout, QInputDialog, QScrollArea, QFrame, QHBoxLayout, QGridLayout
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QClipboard, QIcon
 from crypto import (
     get_fernet, save_verify_token, verify_master_password, VERIFY_FILE, encrypt, decrypt
 )
-from utils import generate_password
+from utils import save_config, load_config, generate_password
 
 DB_PATH = os.path.expanduser("~/.fastword/vault.db")
 
@@ -116,6 +117,17 @@ class VaultWindow(QWidget):
         self.fernet = fernet
         init_db()
 
+
+
+        config = load_config()
+        self.timeout_minutes = config.get('timeout_minutes', 5)
+        self.inactivity_timer = QTimer(self)
+        self.inactivity_timer.setInterval(self.timeout_minutes * 60 * 1000)
+        self.inactivity_timer.timeout.connect(self.handle_timeout)
+        self.inactivity_timer.start()
+        self.installEventFilter(self)  # to track interactions
+
+
         self.setWindowTitle(" Fastword Vault")
         self.resize(300, 500)
         self.setStyleSheet("""
@@ -201,8 +213,11 @@ class VaultWindow(QWidget):
 
 
 
-        self.settings_screen = SettingsScreen(back_callback=self.refresh_vault_screen, fernet=self.fernet)
-            
+        self.settings_screen = SettingsScreen(
+            back_callback=self.refresh_vault_screen,
+            fernet=self.fernet,
+            vault_window=self  # 👈 pass self here
+        )            
 
 
 
@@ -335,6 +350,31 @@ class VaultWindow(QWidget):
 
             if confirm2 == QMessageBox.StandardButton.Yes:
                 self.delete_password(name)
+
+
+
+    def eventFilter(self, obj, event):
+        if event.type() in (event.Type.MouseMove, event.Type.KeyPress):
+            self.inactivity_timer.start()  # reset timer on interaction
+        return super().eventFilter(obj, event)
+
+    def handle_timeout(self):
+        self.inactivity_timer.stop()  # <-- stop the timer so it doesn't trigger again
+        QMessageBox.information(self, "Signed Out", "You were signed out due to inactivity.")
+        self.close()
+        self.login_again()
+
+
+    def closeEvent(self, event):
+        self.inactivity_timer.stop()
+        super().closeEvent(event)
+
+
+
+    def login_again(self):
+        self.login_window = LoginWindow()
+        self.login_window.show()
+
 
     def delete_password(self, name):
         with sqlite3.connect(DB_PATH) as conn:
@@ -548,9 +588,10 @@ class PasswordGeneratorScreen(QWidget):
 
 
 class SettingsScreen(QWidget):
-    def __init__(self, back_callback, fernet):
+    def __init__(self, back_callback, fernet, vault_window):
         super().__init__()
         self.fernet = fernet
+        self.vault_window = vault_window
         self.setStyleSheet("""
             QWidget {
                 background-color: #1a1a1a;
@@ -571,8 +612,13 @@ class SettingsScreen(QWidget):
             }
         """)
 
+
+        
+
         layout = QVBoxLayout()
         layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        header_grid = QGridLayout()
 
         back_btn = QPushButton()
         back_btn.setIcon(QIcon("fastword/icons/back.svg"))
@@ -589,11 +635,42 @@ class SettingsScreen(QWidget):
             }
         """)
         back_btn.clicked.connect(back_callback)
-        layout.addWidget(back_btn, alignment=Qt.AlignmentFlag.AlignLeft)
+
+        title_label = QLabel("Settings")
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_label.setStyleSheet("QLabel { font-size: 18px; font-weight: bold; }")
+
+        # 3-column layout: button, label, spacer
+        header_grid.addWidget(back_btn, 0, 0, alignment=Qt.AlignmentFlag.AlignLeft)
+        header_grid.addWidget(title_label, 0, 1, alignment=Qt.AlignmentFlag.AlignCenter)
+        header_grid.setColumnStretch(0, 1)
+        header_grid.setColumnStretch(1, 2)
+        header_grid.setColumnStretch(2, 1)
+
+        layout.addLayout(header_grid)
+
 
         change_btn = QPushButton("Change Master Password")
         change_btn.clicked.connect(self.change_password)
         layout.addWidget(change_btn)
+
+
+
+        layout.addWidget(QLabel("Auto Sign-Out Timeout (minutes):"))
+        self.timeout_spin = QSpinBox()
+        self.timeout_spin.setRange(1, 30)
+        self.timeout_spin.setValue(5)  # match default
+        layout.addWidget(self.timeout_spin)
+
+        apply_btn = QPushButton("Apply Settings")
+        apply_btn.clicked.connect(self.apply_settings)
+        layout.addWidget(apply_btn)
+
+
+        config = load_config()
+        self.timeout_spin.setValue(config.get('timeout_minutes', 5))
+
+        
 
         self.setLayout(layout)
 
@@ -602,7 +679,8 @@ class SettingsScreen(QWidget):
         if not ok1 or not old_pw:
             return
 
-        if not verify_master_password(get_fernet(old_pw)):
+        old_fernet = get_fernet(old_pw)
+        if not verify_master_password(old_fernet):
             QMessageBox.warning(self, "Incorrect Password", "The current master password you entered is incorrect.")
             return
 
@@ -615,5 +693,39 @@ class SettingsScreen(QWidget):
             QMessageBox.warning(self, "Mismatch", "Passwords do not match.")
             return
 
-        save_verify_token(get_fernet(new_pw))
+        new_fernet = get_fernet(new_pw)
+
+        # Step 1: Decrypt and re-encrypt all passwords
+        with sqlite3.connect(DB_PATH) as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT name, encrypted_password FROM passwords")
+            rows = cursor.fetchall()
+
+            for name, enc_pwd in rows:
+                try:
+                    decrypted = decrypt(old_fernet, enc_pwd)
+                    new_encrypted = encrypt(new_fernet, decrypted)
+                    cursor.execute("UPDATE passwords SET encrypted_password = ? WHERE name = ?", (new_encrypted, name))
+                except Exception as e:
+                    print(f"[!] Failed to re-encrypt '{name}': {e}")
+
+        # Step 2: Save new verification token
+        save_verify_token(new_fernet)
+        self.vault_window.fernet = new_fernet  # update running key
         QMessageBox.information(self, "Password Changed", "Your master password was successfully updated.")
+
+
+    def apply_settings(self):
+        timeout_minutes = self.timeout_spin.value()
+
+        # Save to persistent config
+        config = load_config()
+        config['timeout_minutes'] = timeout_minutes
+        save_config(config)
+
+        # Apply to current session
+        self.vault_window.timeout_minutes = timeout_minutes
+        self.vault_window.inactivity_timer.setInterval(timeout_minutes * 60 * 1000)
+        QMessageBox.information(self, "Settings Applied", f"Timeout set to {timeout_minutes} minutes.")
+
+
