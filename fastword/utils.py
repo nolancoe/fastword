@@ -5,6 +5,7 @@ import json
 
 
 CONFIG_PATH = os.path.expanduser("~/.fastword/config.json")
+SALT_PATH = os.path.expanduser("~/.fastword/salt.bin")
 
 def save_config(data):
     os.makedirs(os.path.dirname(CONFIG_PATH), exist_ok=True)
@@ -18,7 +19,21 @@ def load_config():
         return json.load(f)
 
 
-        
+def save_salt(salt: bytes):
+    os.makedirs(os.path.dirname(SALT_PATH), exist_ok=True)
+    with open(SALT_PATH, "wb") as f:
+        f.write(salt)
+
+def load_salt() -> bytes:
+    if os.path.exists(SALT_PATH):
+        with open(SALT_PATH, "rb") as f:
+            return f.read()
+    else:
+        salt = os.urandom(16)
+        save_salt(salt)
+        return salt
+
+
 
 def generate_password(
     length=16,
