@@ -8,9 +8,9 @@ from PyQt6.QtWidgets import (
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QClipboard, QIcon
 from crypto import (
-    get_fernet, save_verify_token, verify_master_password, VERIFY_FILE, encrypt, decrypt
+    derive_key, save_master_hash, load_master_hash, verify_master_password, VERIFY_FILE, encrypt, decrypt, save_verify_token
 )
-from utils import save_config, load_config, generate_password
+from utils import save_config, load_config, generate_password, load_salt, save_salt
 
 DB_PATH = os.path.expanduser("~/.fastword/vault.db")
 
@@ -27,13 +27,13 @@ def init_db():
         """)
 
 
-def load_passwords(fernet):
+def load_passwords(master_key):
     passwords = []
     with sqlite3.connect(DB_PATH) as conn:
         for row in conn.execute("SELECT name, encrypted_password FROM passwords"):
             name = row[0]
             try:
-                decrypted = decrypt(fernet, row[1])
+                decrypted = decrypt(master_key, row[1])
             except:
                 decrypted = "[DECRYPTION FAILED]"
             passwords.append((name, decrypted))
@@ -95,26 +95,28 @@ class LoginWindow(QWidget):
 
     def handle_submit(self):
         password = self.password_input.text()
-        self.fernet = get_fernet(password)
+        salt = load_salt()
+        master_key = derive_key(password, salt)
 
         if not os.path.exists(VERIFY_FILE):
-            save_verify_token(self.fernet)
-            self.open_vault()
-        elif verify_master_password(self.fernet):
-            self.open_vault()
+            save_salt(salt)
+            save_verify_token(master_key)
+            self.open_vault(master_key)
+        elif verify_master_password(password, salt):
+            self.open_vault(master_key)
         else:
             QMessageBox.warning(self, "Login Failed", "Incorrect master password.")
 
-    def open_vault(self):
-        self.vault = VaultWindow(self.fernet)
+    def open_vault(self, master_key):
+        self.vault = VaultWindow(master_key)
         self.vault.show()
         self.close()
 
 
 class VaultWindow(QWidget):
-    def __init__(self, fernet):
+    def __init__(self, master_key):
         super().__init__()
-        self.fernet = fernet
+        self.master_key = master_key
         init_db()
 
 
@@ -215,7 +217,7 @@ class VaultWindow(QWidget):
 
         self.settings_screen = SettingsScreen(
             back_callback=self.refresh_vault_screen,
-            fernet=self.fernet,
+            master_key=self.master_key,
             vault_window=self  # 👈 pass self here
         )            
 
@@ -228,7 +230,7 @@ class VaultWindow(QWidget):
 
         self.generator_screen = PasswordGeneratorScreen(
             back_callback=self.refresh_vault_screen,
-            fernet=self.fernet
+            master_key=self.master_key
         )
 
         self.stack.addWidget(self.vault_screen)
@@ -252,7 +254,7 @@ class VaultWindow(QWidget):
         for i in reversed(range(self.password_layout.count())):
             self.password_layout.itemAt(i).widget().deleteLater()
 
-        for name, pwd in load_passwords(self.fernet):
+        for name, pwd in load_passwords(self.master_key):
             if filter_text.lower() not in name.lower():
                 continue
             entry = QFrame()
@@ -437,7 +439,7 @@ class VaultWindow(QWidget):
 
             if confirm == QMessageBox.StandardButton.Yes:
                 with sqlite3.connect(DB_PATH) as conn:
-                    encrypted_pwd = encrypt(self.fernet, new_password)
+                    encrypted_pwd = encrypt(self.master_key, new_password)
                     if new_name == old_name:
                         conn.execute("UPDATE passwords SET encrypted_password = ? WHERE name = ?", (encrypted_pwd, old_name))
                     else:
@@ -459,9 +461,9 @@ class VaultWindow(QWidget):
 
 
 class PasswordGeneratorScreen(QWidget):
-    def __init__(self, back_callback, fernet):
+    def __init__(self, back_callback, master_key):
         super().__init__()
-        self.fernet = fernet
+        self.master_key = master_key
         self.setStyleSheet("""
             QWidget {
                 background-color: #1a1a1a;
@@ -582,15 +584,15 @@ class PasswordGeneratorScreen(QWidget):
                     return
 
                 # Proceed with saving if name is unique
-                encrypted_pwd = encrypt(self.fernet, pwd)
+                encrypted_pwd = encrypt(self.master_key, pwd)
                 conn.execute("INSERT INTO passwords (name, encrypted_password) VALUES (?, ?)", (name, encrypted_pwd))
                 QMessageBox.information(self, "Saved", f"Password saved as '{name}'.")
 
 
 class SettingsScreen(QWidget):
-    def __init__(self, back_callback, fernet, vault_window):
+    def __init__(self, back_callback, master_key, vault_window):
         super().__init__()
-        self.fernet = fernet
+        self.master_key = master_key
         self.vault_window = vault_window
         self.setStyleSheet("""
             QWidget {
@@ -616,10 +618,12 @@ class SettingsScreen(QWidget):
         
 
         layout = QVBoxLayout()
-        layout.setAlignment(Qt.AlignmentFlag.AlignTop)
 
+        top_settings_layout = QVBoxLayout()
+        top_settings_layout.setAlignment(Qt.AlignmentFlag.AlignTop)
+
+        # Header row (back + title)
         header_grid = QGridLayout()
-
         back_btn = QPushButton()
         back_btn.setIcon(QIcon("fastword/icons/back.svg"))
         back_btn.setFixedSize(36, 36)
@@ -640,28 +644,37 @@ class SettingsScreen(QWidget):
         title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         title_label.setStyleSheet("QLabel { font-size: 18px; font-weight: bold; }")
 
-        # 3-column layout: button, label, spacer
         header_grid.addWidget(back_btn, 0, 0, alignment=Qt.AlignmentFlag.AlignLeft)
         header_grid.addWidget(title_label, 0, 1, alignment=Qt.AlignmentFlag.AlignCenter)
         header_grid.setColumnStretch(0, 1)
         header_grid.setColumnStretch(1, 2)
         header_grid.setColumnStretch(2, 1)
 
-        layout.addLayout(header_grid)
+        top_settings_layout.addLayout(header_grid)
 
-
+        # Change password button
         change_btn = QPushButton("Change Master Password")
         change_btn.clicked.connect(self.change_password)
-        layout.addWidget(change_btn)
+        top_settings_layout.addWidget(change_btn)
 
-
-
-        layout.addWidget(QLabel("Auto Sign-Out Timeout (minutes):"))
+        # Timeout row
+        timeout_row = QHBoxLayout()
+        timeout_label = QLabel("Auto Sign-Out Timeout (minutes):")
         self.timeout_spin = QSpinBox()
         self.timeout_spin.setRange(1, 30)
-        self.timeout_spin.setValue(5)  # match default
-        layout.addWidget(self.timeout_spin)
+        self.timeout_spin.setValue(5)
 
+        timeout_row.addWidget(timeout_label)
+        timeout_row.addWidget(self.timeout_spin)
+        top_settings_layout.addLayout(timeout_row)
+
+        # Add top layout
+        layout.addLayout(top_settings_layout)
+
+        # Add spacer so Apply button sticks to bottom
+        layout.addStretch()
+
+        # Apply button
         apply_btn = QPushButton("Apply Settings")
         apply_btn.clicked.connect(self.apply_settings)
         layout.addWidget(apply_btn)
@@ -670,19 +683,23 @@ class SettingsScreen(QWidget):
         config = load_config()
         self.timeout_spin.setValue(config.get('timeout_minutes', 5))
 
-        
+
 
         self.setLayout(layout)
 
     def change_password(self):
+        salt = load_salt()  # ← load the salt
+
         old_pw, ok1 = QInputDialog.getText(self, "Verify Password", "Enter your current master password:", QLineEdit.EchoMode.Password)
         if not ok1 or not old_pw:
             return
 
-        old_fernet = get_fernet(old_pw)
-        if not verify_master_password(old_fernet):
+        if not verify_master_password(old_pw, salt):
             QMessageBox.warning(self, "Incorrect Password", "The current master password you entered is incorrect.")
             return
+
+        old_key = derive_key(old_pw, salt)  # ← derive the key from old password
+        old_master_key = old_key
 
         new_pw, ok2 = QInputDialog.getText(self, "New Password", "Enter a new master password:", QLineEdit.EchoMode.Password)
         if not ok2 or not new_pw:
@@ -693,7 +710,7 @@ class SettingsScreen(QWidget):
             QMessageBox.warning(self, "Mismatch", "Passwords do not match.")
             return
 
-        new_fernet = get_fernet(new_pw)
+        new_key = derive_key(new_pw, salt)
 
         # Step 1: Decrypt and re-encrypt all passwords
         with sqlite3.connect(DB_PATH) as conn:
@@ -703,16 +720,17 @@ class SettingsScreen(QWidget):
 
             for name, enc_pwd in rows:
                 try:
-                    decrypted = decrypt(old_fernet, enc_pwd)
-                    new_encrypted = encrypt(new_fernet, decrypted)
+                    decrypted = decrypt(old_key, enc_pwd)
+                    new_encrypted = encrypt(new_key, decrypted)
                     cursor.execute("UPDATE passwords SET encrypted_password = ? WHERE name = ?", (new_encrypted, name))
                 except Exception as e:
                     print(f"[!] Failed to re-encrypt '{name}': {e}")
 
         # Step 2: Save new verification token
-        save_verify_token(new_fernet)
-        self.vault_window.fernet = new_fernet  # update running key
+        save_verify_token(new_key)
+        self.vault_window.master_key = new_key  # update running key
         QMessageBox.information(self, "Password Changed", "Your master password was successfully updated.")
+
 
 
     def apply_settings(self):
