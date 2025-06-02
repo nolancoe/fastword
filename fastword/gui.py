@@ -7,10 +7,12 @@ from PyQt6.QtWidgets import (
 )
 from PyQt6.QtCore import Qt, QTimer
 from PyQt6.QtGui import QClipboard, QIcon
-from crypto import (
-    derive_key, save_master_hash, load_master_hash, verify_master_password, VERIFY_FILE, encrypt, decrypt, save_verify_token
+from fastword.crypto import (
+    derive_key, verify_master_password, VERIFY_FILE, encrypt, decrypt, save_verify_token, 
+    generate_mnemonic, save_recovery_phrase, derive_key_from_mnemonic, save_wrapped_key, load_wrapped_key
 )
-from utils import save_config, load_config, generate_password, load_salt, save_salt
+from fastword.utils import save_config, load_config, generate_password, load_salt, save_salt
+import importlib.resources
 
 DB_PATH = os.path.expanduser("~/.fastword/vault.db")
 
@@ -26,6 +28,14 @@ def init_db():
             )
         """)
 
+
+
+def get_icon_path(filename):
+    return str(importlib.resources.files("fastword.icons").joinpath(filename))
+
+
+def load_icon(filename):
+    return QIcon(get_icon_path(filename))
 
 def load_passwords(master_key):
     passwords = []
@@ -43,7 +53,7 @@ def load_passwords(master_key):
 class LoginWindow(QWidget):
     def __init__(self):
         super().__init__()
-        self.setWindowTitle("🔐 Fastword Login")
+        self.setWindowTitle("Fastword Login")
         self.resize(400, 200)
         self.setStyleSheet("""
             QWidget {
@@ -93,6 +103,18 @@ class LoginWindow(QWidget):
         self.submit_btn.clicked.connect(self.handle_submit)
         self.layout.addWidget(self.submit_btn)
 
+        self.recover_btn = QPushButton("Forgot Password?")
+        self.recover_btn.clicked.connect(self.handle_recovery)
+        self.layout.addWidget(self.recover_btn)
+
+
+        # Reset App button
+        self.reset_btn = QPushButton("Reset App")
+        self.reset_btn.setStyleSheet("QPushButton { background-color: #ff3b30; color: white; } QPushButton:hover { background-color: #ff5e57; }")
+        self.reset_btn.clicked.connect(self.confirm_reset)
+        self.layout.addWidget(self.reset_btn)
+
+
     def handle_submit(self):
         password = self.password_input.text()
         salt = load_salt()
@@ -101,6 +123,15 @@ class LoginWindow(QWidget):
         if not os.path.exists(VERIFY_FILE):
             save_salt(salt)
             save_verify_token(master_key)
+
+            recovery_mnemonic = generate_mnemonic()
+            save_recovery_phrase(master_key, recovery_mnemonic)
+            save_wrapped_key(derive_key_from_mnemonic(recovery_mnemonic), master_key)
+
+            QMessageBox.information(self, "Recovery Key", 
+                f"YOUR RECOVERY PHRASE\n\n**********\n{recovery_mnemonic}\n**********\n\nWrite this down and store it safely.\nIt’s the ONLY way to recover your vault if you forget your master password.")
+
+
             self.open_vault(master_key)
         elif verify_master_password(password, salt):
             self.open_vault(master_key)
@@ -111,6 +142,87 @@ class LoginWindow(QWidget):
         self.vault = VaultWindow(master_key)
         self.vault.show()
         self.close()
+
+    def handle_recovery(self):
+        mnemonic, ok = QInputDialog.getText(self, "Recover Account", "Enter your 12-word recovery phrase:")
+        if ok and mnemonic:
+            try:
+                recovery_key = derive_key_from_mnemonic(mnemonic)
+                original_key = load_wrapped_key(recovery_key)
+
+                # Ask user to set a new password
+                new_pw, ok = QInputDialog.getText(self, "Set New Password", "Enter a new master password:", QLineEdit.EchoMode.Password)
+                if not ok or not new_pw:
+                    return
+
+                # Generate and save new salt
+                new_salt = os.urandom(16)
+                save_salt(new_salt)
+                new_key = derive_key(new_pw, new_salt)
+
+                # Migrate old encrypted data to new key
+                with sqlite3.connect(DB_PATH) as conn:
+                    cursor = conn.cursor()
+                    cursor.execute("SELECT name, encrypted_password FROM passwords")
+                    rows = cursor.fetchall()
+
+                    for name, enc_pwd in rows:
+                        try:
+                            decrypted = decrypt(original_key, enc_pwd)
+                            re_encrypted = encrypt(new_key, decrypted)
+                            cursor.execute("UPDATE passwords SET encrypted_password = ? WHERE name = ?", (re_encrypted, name))
+                        except Exception as e:
+                            print(f"[!] Failed to re-encrypt {name}: {e}")
+
+                # Save verification token for login
+                save_verify_token(new_key)
+
+                # Generate and store new recovery key for the new master password
+                new_mnemonic = generate_mnemonic()
+                save_recovery_phrase(new_key, new_mnemonic)
+                save_wrapped_key(derive_key_from_mnemonic(new_mnemonic), new_key)
+
+                QMessageBox.information(self, "Recovery Successful", f"Your password has been reset.\n\nYour new recovery key is:\n\n{new_mnemonic}\n\nStore it securely!")
+
+                self.open_vault(new_key)
+
+            except Exception as e:
+                import traceback
+                traceback.print_exc()
+                QMessageBox.critical(self, "Recovery Failed", f"Could not recover vault: {str(e)}")
+
+
+    def confirm_reset(self):
+        confirm1 = QMessageBox.warning(
+            self,
+            "Reset App",
+            "This will permanently delete your vault, master password, and recovery phrase.\n\nContinue?",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+        )
+
+        if confirm1 == QMessageBox.StandardButton.Yes:
+            confirm2 = QMessageBox.critical(
+                self,
+                "Final Confirmation",
+                "This action is irreversible. All data will be lost.\nAre you ABSOLUTELY sure?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel
+            )
+
+            if confirm2 == QMessageBox.StandardButton.Yes:
+                import shutil
+                try:
+                    shutil.rmtree(os.path.expanduser("~/.fastword"))
+                except Exception as e:
+                    QMessageBox.critical(self, "Error", f"Failed to reset app: {e}")
+                    return
+
+                QMessageBox.information(self, "Reset Complete", "Vault deleted. Please restart the app.")
+                QApplication.quit()
+
+
+
+
+
 
 
 class VaultWindow(QWidget):
@@ -197,7 +309,7 @@ class VaultWindow(QWidget):
         settings_row.setAlignment(Qt.AlignmentFlag.AlignRight)
 
         settings_btn = QPushButton()
-        settings_btn.setIcon(QIcon("fastword/icons/settings.svg"))
+        settings_btn.setIcon(load_icon("settings.svg"))
         settings_btn.setFixedSize(36, 36)
         settings_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         settings_btn.setStyleSheet("""
@@ -280,7 +392,7 @@ class VaultWindow(QWidget):
 
             def create_icon_button(icon_path):
                 btn = QPushButton()
-                btn.setIcon(QIcon(icon_path))
+                btn.setIcon(load_icon(icon_path))
                 btn.setCursor(Qt.CursorShape.PointingHandCursor)
                 btn.setFixedSize(36, 36)
                 btn.setStyleSheet("""
@@ -295,12 +407,12 @@ class VaultWindow(QWidget):
                 """)
                 return btn
 
-            view_btn = create_icon_button("fastword/icons/eye.svg")
+            view_btn = create_icon_button("eye.svg")
             
-            edit_btn = create_icon_button("fastword/icons/pencil.svg")
+            edit_btn = create_icon_button("pencil.svg")
             edit_btn.clicked.connect(lambda _, n=name, p=pwd: self.edit_password_dialog(n, p))
 
-            delete_btn = create_icon_button("fastword/icons/trash.svg")
+            delete_btn = create_icon_button("trash.svg")
             delete_btn.clicked.connect(lambda _, n=name: self.confirm_delete(n))
 
 
@@ -312,10 +424,10 @@ class VaultWindow(QWidget):
                 def toggle():
                     if name_btn.text() == f" {name}":
                         name_btn.setText(f" {pwd}")
-                        view_btn.setIcon(QIcon("fastword/icons/eye-off.svg"))
+                        view_btn.setIcon(load_icon("eye-off.svg"))
                     else:
                         name_btn.setText(f" {name}")
-                        view_btn.setIcon(QIcon("fastword/icons/eye.svg"))
+                        view_btn.setIcon(load_icon("eye.svg"))
                 return toggle
 
             view_btn.clicked.connect(make_toggle_fn())
@@ -329,7 +441,7 @@ class VaultWindow(QWidget):
     def copy_and_notify(self, btn, text, original_name):
         QApplication.clipboard().setText(text)
         old_icon = btn.icon()
-        btn.setIcon(QIcon("fastword/icons/copy.svg"))
+        btn.setIcon(load_icon("copy.svg"))
         QTimer.singleShot(1200, lambda: btn.setIcon(old_icon))
 
 
@@ -357,11 +469,11 @@ class VaultWindow(QWidget):
 
     def eventFilter(self, obj, event):
         if event.type() in (event.Type.MouseMove, event.Type.KeyPress):
-            self.inactivity_timer.start()  # reset timer on interaction
+            self.inactivity_timer.start()
         return super().eventFilter(obj, event)
 
     def handle_timeout(self):
-        self.inactivity_timer.stop()  # <-- stop the timer so it doesn't trigger again
+        self.inactivity_timer.stop()
         QMessageBox.information(self, "Signed Out", "You were signed out due to inactivity.")
         self.close()
         self.login_again()
@@ -492,7 +604,7 @@ class PasswordGeneratorScreen(QWidget):
         header_row.setAlignment(Qt.AlignmentFlag.AlignLeft)
 
         self.back_btn = QPushButton()
-        self.back_btn.setIcon(QIcon("fastword/icons/back.svg"))
+        self.back_btn.setIcon(load_icon("back.svg"))
         self.back_btn.setFixedSize(36, 36)
         self.back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         self.back_btn.setStyleSheet("""
@@ -625,7 +737,7 @@ class SettingsScreen(QWidget):
         # Header row (back + title)
         header_grid = QGridLayout()
         back_btn = QPushButton()
-        back_btn.setIcon(QIcon("fastword/icons/back.svg"))
+        back_btn.setIcon(load_icon("back.svg"))
         back_btn.setFixedSize(36, 36)
         back_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         back_btn.setStyleSheet("""
@@ -688,7 +800,7 @@ class SettingsScreen(QWidget):
         self.setLayout(layout)
 
     def change_password(self):
-        salt = load_salt()  # ← load the salt
+        salt = load_salt()
 
         old_pw, ok1 = QInputDialog.getText(self, "Verify Password", "Enter your current master password:", QLineEdit.EchoMode.Password)
         if not ok1 or not old_pw:
@@ -698,7 +810,7 @@ class SettingsScreen(QWidget):
             QMessageBox.warning(self, "Incorrect Password", "The current master password you entered is incorrect.")
             return
 
-        old_key = derive_key(old_pw, salt)  # ← derive the key from old password
+        old_key = derive_key(old_pw, salt)
         old_master_key = old_key
 
         new_pw, ok2 = QInputDialog.getText(self, "New Password", "Enter a new master password:", QLineEdit.EchoMode.Password)
