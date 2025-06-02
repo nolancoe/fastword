@@ -1,13 +1,26 @@
 [project]
 name = "fastword"
-version = "0.1.0"
+version = "0.2.1"
 description = "A secure local password manager with PyQt6"
+readme = "README.md"
+license = { file = "LICENSE" }
 authors = [{name = "Nolan Coe"}]
 dependencies = [
     "PyQt6",
-    "cryptography"
+    "cryptography",
+    "argon2-cffi"
 ]
 
 [build-system]
 requires = ["setuptools>=61.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.package-data]
+"fastword" = ["wordlist.txt"]
+"fastword.icons" = ["*.svg"]
+
+[tool.setuptools]
+include-package-data = true
+
+[project.scripts]
+fastword = "fastword.main:main"
