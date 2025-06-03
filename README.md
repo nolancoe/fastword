@@ -89,9 +89,12 @@ pip install -r requirements.txt
 
 ---
 
-## Packaging into Executables
+## Executables
+.deb file available under releases. Download the .deb file then run
 
-Coming soon! Support for `.exe`, `.app`, and `.AppImage` builds using PyInstaller or fbs.
+```bash
+sudo dpkg -i fastword_0.2.1_amd64.deb
+```
 
 ---
 
