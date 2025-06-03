@@ -90,7 +90,7 @@ pip install -r requirements.txt
 ---
 
 ## Executables
-Windows and Linux executables available here https://github.com/nolancoe/fastword/releases
+Linux executable available here https://github.com/nolancoe/fastword/releases
 
 For Linux
 Download the .deb file "Fastword" then run this command
@@ -98,9 +98,6 @@ Download the .deb file "Fastword" then run this command
 ```bash
 sudo dpkg -i fastword_0.2.1_amd64.deb
 ```
-
-For Windows
-Download the .exe file "FastwordInstaller.exe" and run the installer.
 
 ---
 
